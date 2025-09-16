@@ -105,10 +105,15 @@ public final class RoseauCLI implements Callable<Integer> {
 		description = "Stdout format: TEXT or JSON",
 		defaultValue = "TEXT")
 	private StdoutFormat stdoutFormat;
+	@CommandLine.Option(names = "--class-only",
+		description = "Display class paths (.class) instead of source paths in output")
+	private boolean classOnly;
 
 	private enum StdoutFormat { TEXT, JSON }
 
 	private List<NonBreakingChange> lastNonBreakingChanges = List.of();
+	private String jarNameV1;
+	private String jarNameV2;
 
 	private static final Logger LOGGER = LogManager.getLogger(RoseauCLI.class);
 	private static final String RED_TEXT = "\u001B[31m";
@@ -119,18 +124,90 @@ public final class RoseauCLI implements Callable<Integer> {
 	// Returns a display-friendly path by stripping temp/extraction prefixes and starting at a likely groupId root
 	private static String displayPath(Path path) {
 		if (path == null) return "";
-		Path abs = path.toAbsolutePath();
+		// Normalize to a forward-slash string to handle any filesystem (incl. zipfs)
+		String raw = path.toString().replace('\\', '/');
+		// Strip common jar/zip URI scheme prefixes
+		if (raw.startsWith("jar:")) raw = raw.substring(4);
+		if (raw.startsWith("zip:")) raw = raw.substring(4);
+		// If the path contains an internal jar separator, drop everything before it
+		int bang = raw.indexOf('!');
+		if (bang >= 0) {
+			raw = bang + 1 < raw.length() ? raw.substring(bang + 1) : "";
+			if (raw.startsWith("/")) raw = raw.substring(1);
+		}
+
 		// Heuristic roots for Java packages (groupIds)
-		String[] roots = new String[]{"com", "org", "io", "net", "edu", "gov", "jakarta", "javax"};
-		for (int i = 0; i < abs.getNameCount(); i++) {
-			String segment = abs.getName(i).toString();
+		String[] roots = new String[]{"com", "org", "io", "net", "edu", "gov", "jakarta", "javax", "fr"};
+		String[] parts = raw.split("/+", -1);
+		// Prefer the last occurrence of a package root to skip repository-like prefixes inside jars
+		for (int i = parts.length - 1; i >= 0; i--) {
+			String segment = parts[i];
 			for (String root : roots) {
 				if (segment.equals(root)) {
-					return abs.subpath(i, abs.getNameCount()).toString();
+					return String.join("/", Arrays.asList(parts).subList(i, parts.length));
 				}
 			}
 		}
-		return abs.toString();
+		// If no package root detected, return the cleaned path (without jar prefixes)
+		return raw;
+	}
+
+	// Returns the rendered path for output, optionally converting to package-qualified .class when --class-only is set
+	private String renderPath(Path path) {
+		String displayed = displayPath(path);
+		if (!classOnly) {
+			return displayed;
+		}
+		if (path == null) return "";
+		// Build slash-separated class path from displayed path (which starts at package root when possible)
+		String slashPath = displayed
+			.replace('\\', '/')
+			.replaceAll("\\.java$", "")
+			.replaceAll("\\.class$", "");
+		return slashPath + ".class";
+	}
+
+	private static String computeJarName(Path root) {
+		if (root == null) return "";
+		String name = root.getFileName() != null ? root.getFileName().toString() : root.toString();
+		if (name.endsWith(".jar")) {
+			return name;
+		}
+		if (name.endsWith("-sources")) {
+			return name.substring(0, name.length() - 8) + ".jar";
+		}
+		return name + ".jar";
+	}
+
+	private String chooseJarName(Path file) {
+		if (file == null) return "";
+		Path abs = file.toAbsolutePath();
+		// Try to infer from ancestor directory names (e.g., junit-4.12-sources or some.jar)
+		for (Path cur = abs; cur != null; cur = cur.getParent()) {
+			Path fn = cur.getFileName();
+			if (fn == null) continue;
+			String name = fn.toString();
+			if (name.endsWith(".jar")) return name;
+			if (name.endsWith("-sources")) return name.substring(0, name.length() - 8) + ".jar";
+		}
+		// Fallback based on provided roots
+		try {
+			if (v1 != null && abs.startsWith(v1.toAbsolutePath())) return jarNameV1 != null ? jarNameV1 : computeJarName(v1);
+			if (v2 != null && abs.startsWith(v2.toAbsolutePath())) return jarNameV2 != null ? jarNameV2 : computeJarName(v2);
+		} catch (Exception ignored) {
+		}
+		return "";
+	}
+
+	private static String packageNameFromLocation(Path file) {
+		if (file == null) return "";
+		String disp = displayPath(file);
+		int sep = Math.max(disp.lastIndexOf('/'), disp.lastIndexOf('\\'));
+		if (sep > 0) {
+			String folder = disp.substring(0, sep);
+			return folder.replace('/', '.').replace('\\', '.');
+		}
+		return "";
 	}
 
 	private API buildAPI(Path sources, List<Path> classpath) {
@@ -226,7 +303,7 @@ public final class RoseauCLI implements Callable<Integer> {
 	private String format(BreakingChange bc) {
 		if (plain) {
 			String base = String.format("%s %s%n\t%s:%s:%s", bc.kind(), bc.impactedSymbol().getQualifiedName(),
-				displayPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
+				renderPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
 			if (includeCodeBlock) {
 				String oldBlock = readSourceBlock(bc.impactedSymbol().getLocation());
 				String newBlock = bc.newSymbol() != null ? readSourceBlock(bc.newSymbol().getLocation()) : null;
@@ -248,7 +325,7 @@ public final class RoseauCLI implements Callable<Integer> {
 			String base = String.format("%s %s%n\t%s:%s:%s",
 				RED_TEXT + BOLD + bc.kind() + RESET,
 				UNDERLINE + bc.impactedSymbol().getQualifiedName() + RESET,
-				displayPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
+				renderPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
 			if (includeCodeBlock) {
 				String oldBlock = readSourceBlock(bc.impactedSymbol().getLocation());
 				String newBlock = bc.newSymbol() != null ? readSourceBlock(bc.newSymbol().getLocation()) : null;
@@ -275,7 +352,7 @@ public final class RoseauCLI implements Callable<Integer> {
 		if (symbol == null) return title;
 		String base = String.format("%s%n\t%s:%s:%s",
 			title,
-			displayPath(symbol.getLocation().file()), symbol.getLocation().line(), symbol.getLocation().column());
+			renderPath(symbol.getLocation().file()), symbol.getLocation().line(), symbol.getLocation().column());
 		if (includeCodeBlock) {
 			String block = readSourceBlock(symbol.getLocation());
 			if (block != null) return base + String.format("%n\tcode:%n%s", indentBlock(block));
@@ -435,9 +512,11 @@ public final class RoseauCLI implements Callable<Integer> {
 		return root.toString();
 	}
 
-	private static JSONObject createLocationJson(SourceLocation location) {
+	private JSONObject createLocationJson(SourceLocation location) {
 		JSONObject position = new JSONObject();
-		position.put("path", displayPath(location.file()));
+		position.put("path", renderPath(location.file()));
+		position.put("jarName", chooseJarName(location.file()));
+		position.put("packageName", packageNameFromLocation(location.file()));
 		position.put("line", location.line());
 		position.put("column", location.column());
 		return position;
@@ -468,6 +547,10 @@ public final class RoseauCLI implements Callable<Integer> {
 		try {
 			checkArguments();
 			List<Path> classpath = buildClasspath();
+
+			// Initialize jar names once based on --v1/--v2 roots
+			jarNameV1 = computeJarName(v1);
+			jarNameV2 = computeJarName(v2);
 
 			if (apiMode) {
 				API api = buildAPI(v1, classpath);
