@@ -14,6 +14,7 @@ import io.github.alien.roseau.extractors.MavenClasspathBuilder;
 import io.github.alien.roseau.extractors.TypesExtractor;
 import io.github.alien.roseau.extractors.TypesExtractorFactory;
 import io.github.alien.roseau.extractors.asm.AsmTypesExtractor;
+import io.github.alien.roseau.api.model.Symbol;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import spoon.Launcher;
@@ -174,6 +175,30 @@ public final class RoseauCLI implements Callable<Integer> {
 		return slashPath + ".class";
 	}
 
+	// When --class-only is set, compute the declaring class resource path from the symbol's qualified name.
+	// For members like fields/methods, drop the trailing ".member" or ".method(signature)" part and keep inner classes using '$'.
+	private String computeClassResourcePath(Symbol symbol) {
+		if (symbol == null) return "";
+		String elementName = symbol.getQualifiedName();
+		String typeName = elementName;
+		// If this is not a type declaration, strip everything after the last '.' to get the declaring type name
+		if (!(symbol instanceof io.github.alien.roseau.api.model.TypeDecl)) {
+			int lastDot = elementName.lastIndexOf('.');
+			if (lastDot > 0) {
+				typeName = elementName.substring(0, lastDot);
+			}
+		}
+		return typeName.replace('.', '/') + ".class";
+	}
+
+	// Render a path for a symbol: use source path normally, or class resource path when --class-only is set.
+	private String renderSymbolPath(Symbol symbol) {
+		if (!classOnly) {
+			return renderPath(symbol.getLocation().file());
+		}
+		return computeClassResourcePath(symbol);
+	}
+
 	private static String computeJarName(Path root) {
 		if (root == null) return "";
 		String name = root.getFileName() != null ? root.getFileName().toString() : root.toString();
@@ -310,7 +335,7 @@ public final class RoseauCLI implements Callable<Integer> {
 	private String format(BreakingChange bc) {
 		if (plain) {
 			String base = String.format("%s %s%n\t%s:%s:%s", bc.kind(), bc.impactedSymbol().getQualifiedName(),
-				renderPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
+				renderSymbolPath(bc.impactedSymbol()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
 			if (includeCodeBlock) {
 				String oldBlock = readSourceBlock(bc.impactedSymbol().getLocation());
 				String newBlock = bc.newSymbol() != null ? readSourceBlock(bc.newSymbol().getLocation()) : null;
@@ -332,7 +357,7 @@ public final class RoseauCLI implements Callable<Integer> {
 			String base = String.format("%s %s%n\t%s:%s:%s",
 				RED_TEXT + BOLD + bc.kind() + RESET,
 				UNDERLINE + bc.impactedSymbol().getQualifiedName() + RESET,
-				renderPath(bc.impactedSymbol().getLocation().file()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
+				renderSymbolPath(bc.impactedSymbol()), bc.impactedSymbol().getLocation().line(), bc.impactedSymbol().getLocation().column());
 			if (includeCodeBlock) {
 				String oldBlock = readSourceBlock(bc.impactedSymbol().getLocation());
 				String newBlock = bc.newSymbol() != null ? readSourceBlock(bc.newSymbol().getLocation()) : null;
@@ -359,7 +384,7 @@ public final class RoseauCLI implements Callable<Integer> {
 		if (symbol == null) return title;
 		String base = String.format("%s%n\t%s:%s:%s",
 			title,
-			renderPath(symbol.getLocation().file()), symbol.getLocation().line(), symbol.getLocation().column());
+			renderSymbolPath(symbol), symbol.getLocation().line(), symbol.getLocation().column());
 		if (includeCodeBlock) {
 			String block = readSourceBlock(symbol.getLocation());
 			if (block != null) return base + String.format("%n\tcode:%n%s", indentBlock(block));
@@ -471,9 +496,9 @@ public final class RoseauCLI implements Callable<Integer> {
 			JSONObject obj = new JSONObject();
 			obj.put("kind", bc.kind().toString());
 			obj.put("element", bc.impactedSymbol().getQualifiedName());
-			obj.put("oldLocation", createLocationJson(bc.impactedSymbol().getLocation()));
+			obj.put("oldLocation", createLocationJson(bc.impactedSymbol()));
 			if (bc.newSymbol() != null) {
-				obj.put("newLocation", createLocationJson(bc.newSymbol().getLocation()));
+				obj.put("newLocation", createLocationJson(bc.newSymbol()));
 			}
 			if (includeCode) {
 				String oldLine = readSourceLine(bc.impactedSymbol().getLocation());
@@ -498,7 +523,7 @@ public final class RoseauCLI implements Callable<Integer> {
 				obj.put("kind", nbc.kind().toString());
 				if (nbc.newSymbol() != null) {
 					obj.put("element", nbc.newSymbol().getQualifiedName());
-					obj.put("location", createLocationJson(nbc.newSymbol().getLocation()));
+					obj.put("location", createLocationJson(nbc.newSymbol()));
 					if (includeCode) {
 						String line = readSourceLine(nbc.newSymbol().getLocation());
 						if (line != null) obj.put("code", line);
@@ -509,7 +534,7 @@ public final class RoseauCLI implements Callable<Integer> {
 					}
 				} else if (nbc.impactedSymbol() != null) {
 					obj.put("element", nbc.impactedSymbol().getQualifiedName());
-					obj.put("location", createLocationJson(nbc.impactedSymbol().getLocation()));
+					obj.put("location", createLocationJson(nbc.impactedSymbol()));
 				}
 				nonBreaking.put(obj);
 			}
@@ -519,9 +544,10 @@ public final class RoseauCLI implements Callable<Integer> {
 		return root.toString();
 	}
 
-	private JSONObject createLocationJson(SourceLocation location) {
+	private JSONObject createLocationJson(Symbol symbol) {
+		SourceLocation location = symbol.getLocation();
 		JSONObject position = new JSONObject();
-		position.put("path", renderPath(location.file()));
+		position.put("path", renderSymbolPath(symbol));
 		position.put("jarName", chooseJarName(location.file()));
 		position.put("packageName", packageNameFromLocation(location.file()));
 		position.put("line", location.line());
