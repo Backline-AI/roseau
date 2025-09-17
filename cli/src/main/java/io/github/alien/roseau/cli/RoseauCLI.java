@@ -136,6 +136,13 @@ public final class RoseauCLI implements Callable<Integer> {
 			if (raw.startsWith("/")) raw = raw.substring(1);
 		}
 
+		// Prefer the portion after a "-sources/" marker when present
+		int sourcesIdx = raw.lastIndexOf("-sources/");
+		if (sourcesIdx >= 0) {
+			raw = raw.substring(sourcesIdx + "-sources/".length());
+			return raw.startsWith("/") ? raw.substring(1) : raw;
+		}
+
 		// Heuristic roots for Java packages (groupIds)
 		String[] roots = new String[]{"com", "org", "io", "net", "edu", "gov", "jakarta", "javax", "fr"};
 		String[] parts = raw.split("/+", -1);
